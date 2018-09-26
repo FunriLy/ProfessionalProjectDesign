@@ -21,6 +21,16 @@ public class AllGlobal {
     public static boolean isEncryption = false;
 
     /**
+     * 原始数据块
+     */
+    public static final int DATA_BLOCK_NUMBER = 6;
+
+    /**
+     * 编码数据库
+     */
+    public static final int EC_BLOCK_NUMBER = 2;
+
+    /**
      * 编码后数据块数量
      */
     public static final int TOTAL_DATA_NUMBER = 8;

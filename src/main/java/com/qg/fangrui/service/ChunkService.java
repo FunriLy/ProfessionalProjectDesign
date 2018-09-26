@@ -108,6 +108,7 @@ public class ChunkService {
     }
 
     public Chunk getChunkById(long chunkId, boolean isRecycling) {
+        int damageNum = 0;
         Chunk chunk = chunkDao.getChunkByChunkId(chunkId);
         boolean isSuccess = true;
         if (chunk == null) {
@@ -152,10 +153,18 @@ public class ChunkService {
         for (Replica replica : replicaList) {
             if (!replica.isSuccess()) {
                 isSuccess = false;
-                break;
+                // 损坏副本数量 + 1
+                damageNum++;
             }
         }
 
+        // 如果有副本损坏 且损坏数目小于等于EC编码块
+        if (!isSuccess && damageNum <= AllGlobal.EC_BLOCK_NUMBER) {
+            replicaService.replicaRebuild(replicaList);
+            isSuccess = true;
+        }
+
+        // 确保每份 CRC 校验成功
         if (isSuccess) {
             byte[] bytes = replicaService.replicaMerge(replicaList);
             // 校验 Crc

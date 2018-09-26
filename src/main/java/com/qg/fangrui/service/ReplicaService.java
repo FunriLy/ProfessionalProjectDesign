@@ -7,10 +7,7 @@ import com.qg.fangrui.exception.PlacementException;
 import com.qg.fangrui.model.Chunk;
 import com.qg.fangrui.model.Disk;
 import com.qg.fangrui.model.Replica;
-import com.qg.fangrui.util.CommonDateUtil;
-import com.qg.fangrui.util.Crc32Util;
-import com.qg.fangrui.util.DistributedIDUtil;
-import com.qg.fangrui.util.SnappyUtil;
+import com.qg.fangrui.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
@@ -60,17 +57,20 @@ public class ReplicaService {
                     index++;
                     replica.setData(dataAntiFormat(data));
 
+                    replica.setSuccess(true);
                     //校验CRC数据
                     long replicaCrc = Crc32Util.bytes(replica.getData());
                     if (replica.getCrc32() != replicaCrc) {
                         LOGGER.error("Crc32 校验数据失败 : " + replica.getMessage());
                         LOGGER.error("Disk CRC32 "+ replica.getCrc32());
                         LOGGER.error("Calculation CRC32 " + replicaCrc);
-                        throw new CrcCheckSumFaileException("Crc32 校验数据失败");
+                        // throw new CrcCheckSumFaileException("Crc32 校验数据失败");
+                        // CRC 校验失败
+                        replica.setSuccess(false);
                     }
                     LOGGER.info("数据盘 " + replica.getReplicaId() + " " + data.getBytes().length
                             + "   " + Arrays.toString(data.getBytes()));
-                    replica.setSuccess(true);
+
                     // break; 以后一份Replica为准 可能是垃圾回收慢
                 }
                 index++;
@@ -81,6 +81,14 @@ public class ReplicaService {
         } finally {
             count.countDown();
         }
+
+        if (!replica.isSuccess()) {
+            // 若读取失败或者找不到则设置为空
+            byte[] data = new byte[AllGlobal.DISK_CAPACITY];
+            replica.setData(data);
+            replica.setLength(0);
+        }
+
         LOGGER.info("成功读取Replica " + replica.getMessage());
         LOGGER.info("Replica 长度 " + replica.getLength());
     }
@@ -125,9 +133,10 @@ public class ReplicaService {
         if (diskList.size() < AllGlobal.TOTAL_DATA_NUMBER) {
             throw new PlacementException("磁盘分配错误");
         }
-        List<Replica> replicaList = new ArrayList<>(8);
+        List<Replica> replicaList = new ArrayList<>(6);
         byte[] bytes = chunk.getData().getBytes();
-        for (int i=1; i<=AllGlobal.TOTAL_DATA_NUMBER; i++) {
+        // 切分前6个数据块
+        for (int i=1; i<=AllGlobal.DATA_BLOCK_NUMBER; i++) {
             Replica replica = new Replica();
             replica.setChunkId(chunk.getChunkId());
             replica.setReplicaId(i);
@@ -153,7 +162,51 @@ public class ReplicaService {
             replica.setCrc32(Crc32Util.bytes(data));
             replicaList.add(replica);
         }
+
+        // TODO
+        // EC 编码
+        byte[][] coding = ErasureCodecUtil.encode(replicaList);
+
+        if (coding.length != AllGlobal.EC_BLOCK_NUMBER) {
+            throw new PlacementException("EC编码错误！");
+        }
+
+        for (int i= AllGlobal.DATA_BLOCK_NUMBER+1; i<= AllGlobal.TOTAL_DATA_NUMBER; i++) {
+            Replica replica = new Replica();
+            replica.setChunkId(chunk.getChunkId());
+            replica.setReplicaId(i);
+            replica.setCreateTime(chunk.getCreateTime());
+            replica.setDiskId(diskList.get(i-1).getDiskId());
+
+            replica.setData(coding[i - AllGlobal.DATA_BLOCK_NUMBER]);
+            replica.setLength(AllGlobal.DISK_CAPACITY);
+        }
+
         return replicaList;
+    }
+
+    public void replicaRebuild(List<Replica> replicaList) {
+        // 前面隐性保证了数量
+        List<Integer> erasuresList = new ArrayList<>();
+        for (int i=0; i<replicaList.size(); i++) {
+            if (!replicaList.get(i).isSuccess()) {
+                // 记录损坏的行号
+                erasuresList.add(i);
+            }
+        }
+        int[] erasures = erasuresList.stream().mapToInt(i->i).toArray();
+        ErasureCodecUtil.decode(erasures, replicaList);
+        // 重新校验一次 Replica CRC
+        for (Replica replica : replicaList) {
+            long replicaCrc = Crc32Util.bytes(replica.getData());
+            if (replica.getCrc32() != replicaCrc) {
+                LOGGER.error("Crc32 校验数据失败 : " + replica.getMessage());
+                LOGGER.error("Disk CRC32 "+ replica.getCrc32());
+                LOGGER.error("Calculation CRC32 " + replicaCrc);
+                // 此时应该抛出 CRC 校验失败信息
+                throw new CrcCheckSumFaileException("数据复原过程：Crc32 校验数据失败");
+            }
+        }
     }
 
     public byte[] replicaMerge(List<Replica> replicaList) {
@@ -166,9 +219,10 @@ public class ReplicaService {
                 replicaList.get(2).getData(),
                 replicaList.get(3).getData(),
                 replicaList.get(4).getData(),
-                replicaList.get(5).getData(),
-                replicaList.get(6).getData(),
-                replicaList.get(7).getData()
+                replicaList.get(5).getData()
+//                ,
+//                replicaList.get(6).getData(),
+//                replicaList.get(7).getData()
         );
     }
 
